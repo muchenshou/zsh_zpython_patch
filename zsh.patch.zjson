@@ -1,0 +1,454 @@
+diff --git a/Src/Modules/zjson.c b/Src/Modules/zjson.c
+new file mode 100644
+index 000000000..e8b68c326
+--- /dev/null
++++ b/Src/Modules/zjson.c
+@@ -0,0 +1,435 @@
++#include "zjson.mdh"
++#include "zjson.pro"
++#include <json.h>
++#include <stdio.h>
++#include <string.h>
++
++#define DEBUG 0
++
++#if DEBUG
++#define DEBUG_PRINTF(fmt, ...)  fprintf(stderr, "DEBUG: " fmt, ##__VA_ARGS__)
++#else
++#define DEBUG_PRINTF(fmt, ...)  do {} while(0)
++#endif
++
++/////////////////////// json_object_modules
++static struct paramdef partab[];
++static HashTable json_object_map = NULL;
++
++typedef struct JsonObjectNode {
++    struct hashnode node;
++    struct json_object *jsoncObj;
++}JsonObjectNode;
++
++const char *
++jsonTypeToStr(enum json_type type)
++{
++	switch (type) {
++        case json_type_null:
++          	return "null";
++        case json_type_boolean:
++        	return "boolean";
++        case json_type_double:
++       		return "double";
++        case json_type_int:
++       		return "int";
++        case json_type_object:
++          	return "object";
++        case json_type_array:
++        	return "array";
++        case json_type_string:
++          	return "string";
++        default:
++          	return "unknown";
++	}
++}
++
++static void
++freeJsonObjectNode(HashNode hn)
++{
++    zsfree(hn->nam);
++    json_object_put(((struct JsonObjectNode*)hn)->jsoncObj);
++    zfree(hn, sizeof(struct JsonObjectNode));
++}
++
++static struct json_object*
++findJsonObjectByPath(json_object* jsonc_obj, char *path)
++{
++	path = ztrdup(path);
++    const char *delim = ".";
++    DEBUG_PRINTF("path %s\n", path);
++    char *token=strtok(path, delim);
++    struct json_object *cjson = jsonc_obj;
++	while (token != NULL) {
++		DEBUG_PRINTF("find %s\n", token);
++		char *curKey = token;
++		token = strtok(NULL, delim);
++		struct json_object *sub_obj = NULL;
++		if (json_object_is_type(cjson, json_type_array)) {
++            sub_obj = json_object_array_get_idx(cjson, atoi(curKey));
++		}
++		else {
++			sub_obj = json_object_object_get(cjson, curKey);
++		}
++
++    	cjson = sub_obj;
++     	if (!cjson) continue;
++    
++	}
++    free(path);
++    return cjson;
++}
++
++static struct json_object*
++findOrCreateJsonObjectByPath(json_object* jsonc_obj, char *path, json_object *newJsonObj)
++{
++	path = ztrdup(path);
++    const char *delim = ".";
++
++    char *token=strtok(path, delim);
++    struct json_object *cjson = jsonc_obj;
++	while (token != NULL) {
++		struct json_object *child = json_object_object_get(cjson, token);
++    	json_object *parent = cjson;
++     	char *curKey = token;
++      	DEBUG_PRINTF("song_Test create field %s\n", curKey);
++      	token = strtok(NULL, delim);
++     	if (!child) {
++        	int isEnd = token == NULL;
++			if (isEnd) {
++				child = newJsonObj;
++				json_object_object_add(parent, curKey, newJsonObj);
++			}
++			else {
++				child = json_object_new_object();
++				json_object_object_add(parent, curKey, child);
++			}
++      	}
++      	else {
++         	int isEnd = token == NULL;
++         	if (isEnd) {
++				json_object_object_add(parent, curKey, newJsonObj);
++			}
++       	}
++      	cjson = child;
++	}
++    free(path);
++    return cjson;
++}
++/**/
++static void
++unsetpzjson(Param pm, UNUSED(int exp))
++{
++    /* Unlink the file given by pm->nam */
++    char *fname = ztrdup(pm->node.nam);
++    DEBUG_PRINTF("song_Test unsetpzjson %s\n", fname);
++    // song_Test todo release memory?
++    HashNode hn = gethashnode2(json_object_map, fname);
++    struct JsonObjectNode *jsn = (struct JsonObjectNode *)hn;
++    if (jsn && jsn->jsoncObj) {
++    	json_object_put(jsn->jsoncObj);
++     	jsn->jsoncObj = NULL;
++     	free(jsn);
++    }
++    free(fname);
++}
++
++
++
++/**/
++static void
++setpzjson(Param pm, char *value)
++{
++    int fd = -1, len;
++    char *name = ztrdup(pm->node.nam);
++    const char *delim = ".";
++    char *token = strtok(name, delim);
++    
++    struct JsonObjectNode *jsn = (struct JsonObjectNode *)gethashnode2(json_object_map, token);
++    struct json_object *root;
++    char * jsonStr = value;
++    
++    struct json_tokener *tok=json_tokener_new();
++    struct json_object *newJsonObj = (struct json_object *)json_tokener_parse_ex(tok, jsonStr, -1);
++    enum json_tokener_error err;
++    err=json_tokener_get_error(tok);
++    int offset = json_tokener_get_parse_end(tok);
++    DEBUG_PRINTF("song_Test offset %d %d", offset, strlen(jsonStr));
++    if (!newJsonObj || err != json_tokener_success || offset != strlen(jsonStr)) {
++      	DEBUG_PRINTF("Failed to create json object, so convert to str %s \n", value);
++	   	int valueLen = strlen(value);
++	    int newValueLen = valueLen*2 + 10;
++        jsonStr = zhalloc(newValueLen);
++        memset(jsonStr, 0, newValueLen);
++        int j=0;
++        jsonStr[j++]='"';
++        for (int i = 0; i < valueLen; i++) {
++			char ch = value[i];
++			if (ch == '"') {
++				jsonStr[j++] = '\\';
++    			jsonStr[j++] = '"';
++            }
++			else if (ch == '\\') {
++		 		jsonStr[j++] = '\\';
++    			jsonStr[j++] = '\\';
++			}
++            else {
++            	jsonStr[j++]=ch;
++	             
++            }
++        }
++        jsonStr[j++]='"';
++        DEBUG_PRINTF("jsonStr %s\n", jsonStr);
++        newJsonObj = (struct json_object *)json_tokener_parse(jsonStr);
++    }
++    char * start = strstr(pm->node.nam, ".");
++
++    if (jsn) {
++   		root = jsn->jsoncObj;
++   		
++		if (start) {
++			findOrCreateJsonObjectByPath(root, ++start, newJsonObj);
++		}
++		else {
++			json_object_put(jsn->jsoncObj);
++			root = newJsonObj;
++		}
++    	
++    }
++    else {
++    	jsn = (struct JsonObjectNode*)zalloc(sizeof(struct JsonObjectNode));
++     	jsn->node.nam = ztrdup(token);
++     	HashNode oldhn = addhashnode2(json_object_map, jsn->node.nam, jsn);
++      	HashNode newhn = gethashnode2(json_object_map, jsn->node.nam);
++
++       	if (start) {
++
++        	root = json_object_new_object();
++			findOrCreateJsonObjectByPath(root, ++start, newJsonObj);
++			char *test = json_object_to_json_string_ext(root, JSON_C_TO_STRING_SPACED | JSON_C_TO_STRING_PRETTY);
++			DEBUG_PRINTF("test print root %s\n", test);
++		}
++		else {
++			root = newJsonObj;
++		}
++       	DEBUG_PRINTF("song_Test setpmm %s add json node %p %p\n",  jsn->node.nam, json_object_map, newhn);
++    }
++    jsn->jsoncObj = root;
++
++    DEBUG_PRINTF("song_Test setpzjson %s %s\n", pm->node.nam, value);
++    free(name);
++    free(value);
++    
++}
++
++static const struct gsu_scalar zjson_gsu =
++{ strgetfn, setpzjson, unsetpzjson };
++
++/**/
++static HashNode
++getpzjson(UNUSED(HashTable ht), const char *name)
++{
++    char *contents;
++    char *str = dupstring(name);
++    const char *delim = ".";
++    Param pm = NULL;
++    
++    
++	char *token = strtok(str, delim);
++    HashNode hn = gethashnode2(json_object_map, token);
++    struct JsonObjectNode *jsn = (struct JsonObjectNode *)hn;
++    DEBUG_PRINTF("song_Test getpzjson %s %p %p\n", name, json_object_map, hn);
++    
++    pm = (Param) hcalloc(sizeof(struct param));
++    pm->node.nam = dupstring(name);
++    pm->node.flags = PM_SCALAR;
++    pm->gsu.s = &zjson_gsu;
++    pm->node.flags |= (partab[0].pm->node.flags & PM_READONLY);
++    struct json_object * jsonc_obj = NULL;
++    if (jsn != NULL) {
++    	jsonc_obj = jsn->jsoncObj;
++    }
++
++    /* Set u.str to contents of file given by name */
++    if (jsonc_obj) {
++   		contents = json_object_to_json_string_ext(jsonc_obj, JSON_C_TO_STRING_SPACED | JSON_C_TO_STRING_PRETTY);
++     	char * parenStr = dupstring(name);
++		char * start = strstr(parenStr, ".");
++		char *callArgs = strrchr(parenStr, '(');
++		char *callName = NULL;
++		if( name[strlen(name)-1] == ')' && callArgs ){
++			char *callStart = strrchr(parenStr, '.') + 1;
++			callName = dupstrpfx(callStart, callArgs - callStart);
++			*(callStart-1) = '\0';
++		}
++		DEBUG_PRINTF("find get %p\n", start);
++
++		if (start) {
++			struct json_object *sub_obj = findJsonObjectByPath(jsonc_obj, ++start);
++			if (sub_obj) {
++				contents = (char *) json_object_get_string(sub_obj);
++				if (callName) {
++					fprintf(stderr, "callName %s\n", callName);
++					fprintf(stderr, "callArgs %s\n", callArgs);
++				}
++				if (callName && !strcmp(callName, "typeof")) {
++					enum json_type jt = json_object_get_type(sub_obj);
++					contents = jsonTypeToStr(jt);
++				}
++				else if (callName && !strcmp(callName, "toString")) {
++					enum json_type jt = json_object_get_type(sub_obj);
++					struct json_object *strObject = json_object_new_string(contents);
++					contents = json_object_to_json_string(strObject);
++				}
++			}
++		}
++    }
++    if (contents)
++	pm->u.str = contents;
++    else {
++	pm->u.str = "";
++	pm->node.flags |= PM_UNSET;
++    }
++    return &pm->node;
++}
++
++
++/**/
++static void
++scanpzjson(UNUSED(HashTable ht), ScanFunc func, int flags)
++{
++    struct param pm;
++    DEBUG_PRINTF("song_Test scanpzjson\n");
++    memset((void *)&pm, 0, sizeof(struct param));
++    pm.node.flags = PM_SCALAR;
++    pm.gsu.s = &zjson_gsu;
++    pm.node.flags |= (partab[0].pm->node.flags & PM_READONLY);
++    
++    HashNode hn;
++    int i;
++    ht = json_object_map;
++    for (i = 0; i < ht->hsize; i++) {
++   		for (hn = ht->nodes[i]; hn; hn = hn->next) {
++			struct value v;
++            
++            v.isarr = v.flags = v.start = 0;
++			v.end = -1;
++			v.arr = NULL;
++			v.pm = (Param) hn;
++	  
++			pm.node.nam = dupstring(hn->nam);
++			struct JsonObjectNode *jsn = (struct JsonObjectNode *)gethashnode2(json_object_map, pm.node.nam);
++			pm.u.str = json_object_to_json_string_ext(jsn->jsoncObj, JSON_C_TO_STRING_SPACED | JSON_C_TO_STRING_PRETTY);
++			func(&pm.node, flags);
++	    }
++    }
++}
++
++
++/**/
++static void
++setpzjsons(Param pm, HashTable ht)
++{
++    int i;
++    HashNode hn;
++    DEBUG_PRINTF("song_Test setpzjsons sssss 11111\n");
++    if (!ht)
++	return;
++    DEBUG_PRINTF("song_Test setpzjsons sssss 2222\n");
++    if (!(pm->node.flags & PM_READONLY))
++	for (i = 0; i < ht->hsize; i++)
++	    for (hn = ht->nodes[i]; hn; hn = hn->next) {
++		struct value v;
++
++		v.isarr = v.flags = v.start = 0;
++		v.end = -1;
++		v.arr = NULL;
++		v.pm = (Param) hn;
++
++		setpzjson(v.pm, ztrdup(getstrvalue(&v)));
++	    }
++    if (ht != pm->u.hash)
++	deleteparamtable(ht);
++}
++
++static const struct gsu_hash zjsons_gsu =
++{ hashgetfn, setpzjsons, stdunsetfn };
++
++
++static struct paramdef partab[] = {
++    SPECIALPMDEF("zjson", 0, &zjsons_gsu, getpzjson, scanpzjson)
++};
++
++
++static struct features module_features = {
++	NULL,   0,
++    NULL,   0,
++    NULL,   0,
++    partab, sizeof(partab)/sizeof(*partab),
++    0
++};
++
++/**/
++int
++setup_(UNUSED(Module m))
++{
++    return 0;
++}
++
++/**/
++int
++features_(Module m, char ***features)
++{
++    *features = featuresarray(m, &module_features);
++    return 0;
++}
++
++/**/
++int
++enables_(Module m, int **enables)
++{
++    return handlefeatures(m, &module_features, enables);
++}
++
++/**/
++int
++boot_(UNUSED(Module m))
++{
++	HashTable ht;
++    ht = newhashtable(201, "json_object_map", NULL);
++
++    ht->hash        = hasher;
++    ht->emptytable  = emptyhashtable;
++    ht->filltable   = NULL;
++    ht->cmpnodes    = strcmp;
++    ht->addnode     = addhashnode;
++    /* DISABLED is not supported */
++    ht->getnode     = gethashnode2;
++    ht->getnode2    = gethashnode2;
++    ht->removenode  = removehashnode;
++    ht->disablenode = NULL;
++    ht->enablenode  = NULL;
++    ht->freenode    = freeJsonObjectNode;
++    ht->printnode   = NULL;
++    json_object_map = ht;
++    DEBUG_PRINTF("song_Test newjsonmap %p\n", ht);
++    return 0;
++}
++
++/**/
++int
++cleanup_(Module m)
++{
++	if (json_object_map) {
++		deletehashtable(json_object_map);
++		json_object_map = NULL;
++	}
++    return setfeatureenables(m, &module_features, NULL);
++}
++
++/**/
++int
++finish_(UNUSED(Module m))
++{
++    return 0;
++}
+diff --git a/Src/Modules/zjson.mdd b/Src/Modules/zjson.mdd
+new file mode 100644
+index 000000000..5c4752818
+--- /dev/null
++++ b/Src/Modules/zjson.mdd
+@@ -0,0 +1,7 @@
++name=zsh/zjson
++link=dynamic
++load=no
++
++autofeatures="b:zjson"
++
++objects="zjson.o"
